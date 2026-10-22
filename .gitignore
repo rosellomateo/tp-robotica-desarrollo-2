@@ -1,0 +1,25 @@
+# Python
+entorno/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Estado temporal del simulador
+entorno/sim/.pose_actual.json
+entorno/sim/.simulador_activo.json
+
+# Dashboard
+mi_dashboard/node_modules/
+mi_dashboard/dist/
+mi_dashboard/.next/
+mi_dashboard/.vinext/
+mi_dashboard/.wrangler/
+mi_dashboard/coverage/
+mi_dashboard/.env*
+
+# Sistema y editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
