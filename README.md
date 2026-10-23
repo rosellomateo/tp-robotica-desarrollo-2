@@ -13,7 +13,7 @@ No hace falta descargar el SDK de Unitree ni CycloneDDS.
 ## Requisitos
 
 - Python 3.10 o superior
-- Node.js 22.13 o superior
+- Node.js 20 o superior
 - Git
 
 ## Instalación
@@ -24,7 +24,7 @@ No hace falta descargar el SDK de Unitree ni CycloneDDS.
 python3 -m venv entorno/.venv
 entorno/.venv/bin/python -m pip install -r requirements.txt
 cd mi_dashboard
-npm ci
+npm install
 cd ..
 ```
 
@@ -34,7 +34,7 @@ cd ..
 py -3 -m venv entorno\.venv
 entorno\.venv\Scripts\python.exe -m pip install -r requirements.txt
 cd mi_dashboard
-npm ci
+npm install
 cd ..
 ```
 
@@ -82,11 +82,13 @@ botón **Conexión** del dashboard e ingresá la dirección mostrada por el back
 ## Funcionalidades del dashboard
 
 - Telemetría por WebSocket con reconexión automática.
-- Ángulos, velocidad, torque y temperatura de todos los motores.
-- Roll, pitch, yaw y horizonte artificial.
-- Batería y patas apoyadas para el Go2.
+- Ángulos, velocidad, torque y temperatura de todos los motores, con semáforo
+  verde/amarillo/rojo igual a electroSim.
+- Roll, pitch, yaw, horizonte artificial e histórico de IMU en gráfico de línea.
+- Panel BMS completo: carga, corriente, temperatura de batería y voltaje por celda.
+- Patas apoyadas para el Go2.
 - Adaptación automática al G1 y al Go2 mediante `/info`.
-- Exportación CSV de hasta 6000 muestras de la sesión.
+- Botón **Capturar muestra** + exportación CSV de hasta 6000 muestras capturadas.
 
 El contrato completo del backend está documentado en `API.md`.
 
@@ -95,7 +97,7 @@ El contrato completo del backend está documentado en `API.md`.
 ```bash
 cd mi_dashboard
 npm run lint
-npm test
+npm run build
 ```
 
 ## Publicar en Git

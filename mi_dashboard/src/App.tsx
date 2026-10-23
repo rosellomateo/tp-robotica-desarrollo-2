@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Motor = {
@@ -32,11 +30,19 @@ type RobotInfo = {
 type Status = "connecting" | "online" | "offline";
 type Point = { t: number; values: number[] };
 type RecordedSnapshot = { receivedAt: string; data: Telemetria };
+type NivelTemperatura = "ok" | "warn" | "danger";
 
 const SERIES_COLORS = ["#0d7c7b", "#ec7d55", "#5271a8", "#9d6aae"];
 const MAX_POINTS = 80;
-const MAX_EXPORT_SNAPSHOTS = 6000;
+const MAX_CAPTURAS = 6000;
 const DEFAULT_API_BASE = "http://127.0.0.1:8001";
+
+// Semáforo igual a electroSim: verde <40°C, amarillo 40-60°C, rojo >60°C.
+function nivelTemperatura(temp: number): NivelTemperatura {
+  if (temp > 60) return "danger";
+  if (temp >= 40) return "warn";
+  return "ok";
+}
 
 function normalizarBase(value: string) {
   let base = value.trim().replace(/\/$/, "");
@@ -53,7 +59,19 @@ function csvCell(value: string | number) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function LineChart({ points, labels }: { points: Point[]; labels: string[] }) {
+function LineChart({
+  points,
+  labels,
+  range = 120,
+  unit = "°",
+  ariaLabel,
+}: {
+  points: Point[];
+  labels: string[];
+  range?: number;
+  unit?: string;
+  ariaLabel: string;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -83,14 +101,15 @@ function LineChart({ points, labels }: { points: Point[]; labels: string[] }) {
       ctx.font = "10px Arial";
       ctx.lineWidth = 1;
 
+      const step = (range * 2) / 4;
       for (let i = 0; i <= 4; i++) {
         const y = pad.top + (plotH / 4) * i;
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
         ctx.lineTo(width - pad.right, y);
         ctx.stroke();
-        const value = 120 - i * 60;
-        ctx.fillText(`${value}°`, 7, y + 3);
+        const value = range - i * step;
+        ctx.fillText(`${value}${unit}`, 7, y + 3);
       }
 
       if (points.length < 2) return;
@@ -102,7 +121,7 @@ function LineChart({ points, labels }: { points: Point[]; labels: string[] }) {
         points.forEach((point, index) => {
           const x = pad.left + (index / Math.max(points.length - 1, 1)) * plotW;
           const raw = point.values[seriesIndex] ?? 0;
-          const y = pad.top + ((120 - Math.max(-120, Math.min(120, raw))) / 240) * plotH;
+          const y = pad.top + ((range - Math.max(-range, Math.min(range, raw))) / (range * 2)) * plotH;
           if (index === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
@@ -114,24 +133,26 @@ function LineChart({ points, labels }: { points: Point[]; labels: string[] }) {
     observer.observe(parent);
     draw();
     return () => observer.disconnect();
-  }, [points, labels]);
+  }, [points, labels, range, unit]);
 
-  return <canvas ref={canvasRef} aria-label="Historial de ángulos de motores" role="img" />;
+  return <canvas ref={canvasRef} aria-label={ariaLabel} role="img" />;
 }
 
-export default function Home() {
+export default function App() {
   const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
   const [draftBase, setDraftBase] = useState(DEFAULT_API_BASE);
   const [status, setStatus] = useState<Status>("connecting");
   const [telemetry, setTelemetry] = useState<Telemetria | null>(null);
   const [info, setInfo] = useState<RobotInfo | null>(null);
-  const [history, setHistory] = useState<Point[]>([]);
+  const [motorHistory, setMotorHistory] = useState<Point[]>([]);
+  const [imuHistory, setImuHistory] = useState<Point[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [recordedCount, setRecordedCount] = useState(0);
+  const [capturedCount, setCapturedCount] = useState(0);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const exportBufferRef = useRef<RecordedSnapshot[]>([]);
+  const telemetryRef = useRef<Telemetria | null>(null);
+  const capturasRef = useRef<RecordedSnapshot[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,15 +186,17 @@ export default function Home() {
         try {
           const next = JSON.parse(event.data) as Telemetria;
           setTelemetry(next);
+          telemetryRef.current = next;
           setLastUpdate(new Date());
           setStatus("online");
-          exportBufferRef.current.push({ receivedAt: new Date().toISOString(), data: next });
-          if (exportBufferRef.current.length > MAX_EXPORT_SNAPSHOTS) exportBufferRef.current.shift();
-          setRecordedCount(exportBufferRef.current.length);
-          const selected = next.motores.slice(0, 4);
-          setHistory((current) => [
+          const selectedMotors = next.motores.slice(0, 4);
+          setMotorHistory((current) => [
             ...current,
-            { t: next.ts, values: selected.map((motor) => motor.angulo) },
+            { t: next.ts, values: selectedMotors.map((motor) => motor.angulo) },
+          ].slice(-MAX_POINTS));
+          setImuHistory((current) => [
+            ...current,
+            { t: next.ts, values: [next.imu.roll, next.imu.pitch, next.imu.yaw] },
           ].slice(-MAX_POINTS));
         } catch {
           setStatus("offline");
@@ -201,10 +224,12 @@ export default function Home() {
   const applyBase = useCallback(() => {
     const next = normalizarBase(draftBase);
     if (!next) return;
-    setHistory([]);
+    setMotorHistory([]);
+    setImuHistory([]);
     setTelemetry(null);
-    exportBufferRef.current = [];
-    setRecordedCount(0);
+    telemetryRef.current = null;
+    capturasRef.current = [];
+    setCapturedCount(0);
     setApiBase(next);
     setDraftBase(next);
     setSettingsOpen(false);
@@ -212,22 +237,34 @@ export default function Home() {
 
   const model = info?.modelo ?? telemetry?.modelo;
 
+  // Requisito transversal: "Capturar" guarda una muestra puntual a pedido
+  // del usuario; es independiente del refresco continuo de los gráficos.
+  const capturarMuestra = useCallback(() => {
+    const actual = telemetryRef.current;
+    if (!actual) return;
+    capturasRef.current.push({ receivedAt: new Date().toISOString(), data: actual });
+    if (capturasRef.current.length > MAX_CAPTURAS) capturasRef.current.shift();
+    setCapturedCount(capturasRef.current.length);
+  }, []);
+
   const exportCsv = useCallback(() => {
-    if (!exportBufferRef.current.length) return;
+    if (!capturasRef.current.length) return;
     const headers = [
       "fecha_iso", "tiempo_robot_s", "modelo", "motor_id", "motor_nombre",
       "angulo_grados", "velocidad_rad_s", "torque_nm", "temperatura_c",
-      "roll_grados", "pitch_grados", "yaw_grados", "bateria_pct",
+      "roll_grados", "pitch_grados", "yaw_grados",
+      "bateria_pct", "corriente_ma", "temperatura_bateria_c",
       "pata_FR", "pata_FL", "pata_RR", "pata_RL",
     ];
     const rows: Array<Array<string | number>> = [headers];
 
-    exportBufferRef.current.forEach(({ receivedAt, data }) => {
+    capturasRef.current.forEach(({ receivedAt, data }) => {
       data.motores.forEach((motor) => {
         rows.push([
           receivedAt, data.ts, data.modelo, motor.id, motor.nombre,
           motor.angulo, motor.velocidad, motor.torque, motor.temperatura,
-          data.imu.roll, data.imu.pitch, data.imu.yaw, data.bms.soc,
+          data.imu.roll, data.imu.pitch, data.imu.yaw,
+          data.bms.soc, data.bms.corriente, data.bms.temperatura,
           data.fuerzas?.FR ?? "", data.fuerzas?.FL ?? "",
           data.fuerzas?.RR ?? "", data.fuerzas?.RL ?? "",
         ]);
@@ -261,6 +298,7 @@ export default function Home() {
     ? Object.values(telemetry.fuerzas ?? {}).filter((value) => value > 0).length
     : 0;
   const robotName = info?.nombre ?? telemetry?.modelo?.toUpperCase() ?? "Robot Unitree";
+  const celdas = telemetry?.bms.celdas ?? [];
 
   return (
     <main className="dashboard-shell">
@@ -277,7 +315,10 @@ export default function Home() {
             <span className="status-dot" />
             {status === "online" ? "En línea" : status === "connecting" ? "Conectando" : "Sin conexión"}
           </div>
-          <button className="export-button" type="button" onClick={exportCsv} disabled={!recordedCount} aria-label={`Exportar ${recordedCount} muestras como CSV`}>
+          <button className="capture-button" type="button" onClick={capturarMuestra} disabled={!telemetry} aria-label="Capturar la muestra actual">
+            <span aria-hidden="true">●</span> Capturar muestra
+          </button>
+          <button className="export-button" type="button" onClick={exportCsv} disabled={!capturedCount} aria-label={`Exportar ${capturedCount} muestras capturadas como CSV`}>
             <span aria-hidden="true">↓</span> Exportar CSV
           </button>
           <button className="settings-button" type="button" onClick={() => setSettingsOpen((open) => !open)} aria-expanded={settingsOpen}>
@@ -360,8 +401,8 @@ export default function Home() {
             </div>
           </div>
           <div className="chart-area">
-            {history.length < 2 && <div className="empty-chart">Esperando datos para construir el historial…</div>}
-            <LineChart points={history} labels={chartMotors.map((motor) => motor.nombre)} />
+            {motorHistory.length < 2 && <div className="empty-chart">Esperando datos para construir el historial…</div>}
+            <LineChart points={motorHistory} labels={chartMotors.map((motor) => motor.nombre)} range={120} ariaLabel="Historial de ángulos de motores" />
           </div>
           <div className="chart-footer"><span>−120°</span><span>Ventana móvil · {MAX_POINTS / 10} segundos</span><span>+120°</span></div>
         </article>
@@ -392,10 +433,53 @@ export default function Home() {
         </article>
       </section>
 
+      <section className="telemetry-grid">
+        <article className="chart-card panel">
+          <div className="section-heading">
+            <div><p className="eyebrow">INCLINACIÓN EN EL TIEMPO</p><h2>Historial de IMU</h2></div>
+            <div className="legend" aria-label="Series del gráfico">
+              <span><i style={{ background: SERIES_COLORS[0] }} />Roll</span>
+              <span><i style={{ background: SERIES_COLORS[1] }} />Pitch</span>
+              <span><i style={{ background: SERIES_COLORS[2] }} />Yaw</span>
+            </div>
+          </div>
+          <div className="chart-area">
+            {imuHistory.length < 2 && <div className="empty-chart">Esperando datos para construir el historial…</div>}
+            <LineChart points={imuHistory} labels={["Roll", "Pitch", "Yaw"]} range={180} ariaLabel="Historial de roll, pitch y yaw" />
+          </div>
+          <div className="chart-footer"><span>−180°</span><span>Ventana móvil · {MAX_POINTS / 10} segundos · mín. 60 muestras</span><span>+180°</span></div>
+        </article>
+
+        <article className="bms-card panel">
+          <div className="section-heading">
+            <div><p className="eyebrow">BATERÍA</p><h2>Panel BMS</h2></div>
+          </div>
+          <div className="bms-summary">
+            <div><small>CARGA</small><strong>{formato(telemetry?.bms.soc, 0, "%")}</strong></div>
+            <div><small>CORRIENTE</small><strong>{formato(telemetry?.bms.corriente, 0, " mA")}</strong></div>
+            <div><small>TEMPERATURA</small><strong>{formato(telemetry?.bms.temperatura, 1, " °C")}</strong></div>
+          </div>
+          <div className="cell-grid" aria-label="Voltaje por celda">
+            {celdas.length
+              ? celdas.map((volt, index) => (
+                  <div className="cell-chip" key={index}>
+                    <small>CEL {index + 1}</small>
+                    <span>{formato(volt, 2, " V")}</span>
+                  </div>
+                ))
+              : <p className="empty-inline">Sin datos de celdas.</p>}
+          </div>
+        </article>
+      </section>
+
       <section className="motors-section panel">
         <div className="section-heading motors-heading">
           <div><p className="eyebrow">DIAGNÓSTICO POR ARTICULACIÓN</p><h2>Estado de motores</h2></div>
-          <div className="temperature-key"><span>FRÍO</span><i /><span>CALIENTE</span></div>
+          <div className="temperature-key" aria-label="Referencia del semáforo de temperatura">
+            <span className="key-item"><i className="dot ok" /> &lt;40°C</span>
+            <span className="key-item"><i className="dot warn" /> 40-60°C</span>
+            <span className="key-item"><i className="dot danger" /> &gt;60°C</span>
+          </div>
         </div>
         {motors.length ? (
           <div className="motor-table" role="table" aria-label="Estado de motores">
@@ -403,14 +487,18 @@ export default function Home() {
               <span role="columnheader">MOTOR</span><span role="columnheader">ÁNGULO</span><span role="columnheader">VELOCIDAD</span><span role="columnheader">TORQUE</span><span role="columnheader">TEMPERATURA</span>
             </div>
             {motors.map((motor) => {
-              const tempLevel = Math.max(0, Math.min(100, ((motor.temperatura - 20) / 60) * 100));
+              const nivel = nivelTemperatura(motor.temperatura);
               return (
                 <div className="motor-row" role="row" key={motor.id}>
                   <span className="motor-name" role="cell"><i>{String(motor.id + 1).padStart(2, "0")}</i><strong>{motor.nombre}</strong></span>
                   <span role="cell"><small>Ángulo</small>{formato(motor.angulo, 1, "°")}</span>
                   <span role="cell"><small>Velocidad</small>{formato(motor.velocidad, 2, " rad/s")}</span>
                   <span role="cell"><small>Torque</small>{formato(motor.torque, 2, " Nm")}</span>
-                  <span className="temp-cell" role="cell"><small>Temperatura</small><b>{formato(motor.temperatura, 1, " °C")}</b><em><i style={{ width: `${tempLevel}%` }} /></em></span>
+                  <span className={`temp-cell temp-${nivel}`} role="cell">
+                    <small>Temperatura</small>
+                    <b>{formato(motor.temperatura, 1, " °C")}</b>
+                    <i className="temp-dot" aria-hidden="true" />
+                  </span>
                 </div>
               );
             })}
@@ -426,7 +514,7 @@ export default function Home() {
 
       <footer>
         <span>UADE · Desarrollo de Aplicaciones II</span>
-        <span>{apiBase} · {recordedCount} muestras en memoria</span>
+        <span>{apiBase} · {capturedCount} muestras capturadas</span>
         <span>TP05 / UNITREE LAB</span>
       </footer>
     </main>
