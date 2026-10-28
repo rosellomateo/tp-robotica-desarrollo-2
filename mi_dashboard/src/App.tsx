@@ -34,7 +34,6 @@ type NivelTemperatura = "ok" | "warn" | "danger";
 
 const SERIES_COLORS = ["#0d7c7b", "#ec7d55", "#5271a8", "#9d6aae"];
 const MAX_POINTS = 80;
-const MAX_CAPTURAS = 6000;
 const DEFAULT_API_BASE = "http://127.0.0.1:8001";
 
 // Semáforo igual a electroSim: verde <40°C, amarillo 40-60°C, rojo >60°C.
@@ -54,9 +53,50 @@ function formato(value: number | undefined, digits = 1, suffix = "") {
   return Number.isFinite(value) ? `${value!.toFixed(digits)}${suffix}` : "—";
 }
 
+function estadoContacto(valor: number | undefined) {
+  return valor === 1 ? "supported" : valor === 0 ? "raised" : "unknown";
+}
+
+function reiniciarHistorial(anterior: Telemetria | null, siguiente: Telemetria) {
+  return !anterior || anterior.modelo !== siguiente.modelo || siguiente.ts < anterior.ts;
+}
+
 function csvCell(value: string | number) {
   const text = String(value);
-  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+// Una fila por motor y captura; columnas comunes para toda la sesión.
+function generarCsv(capturas: RecordedSnapshot[]) {
+  const cantidadCeldas = capturas.reduce((max, { data }) => Math.max(max, data.bms.celdas.length), 0);
+  const contactos = Array.from(new Set([
+    "FR", "FL", "RR", "RL", "R_foot", "L_foot",
+    ...capturas.flatMap(({ data }) => Object.keys(data.fuerzas ?? {})),
+  ]));
+  const headers = [
+    "muestra_id", "fecha_iso", "tiempo_robot_s", "modelo", "motor_id", "motor_nombre",
+    "angulo_grados", "velocidad_rad_s", "torque_nm", "temperatura_c",
+    "roll_grados", "pitch_grados", "yaw_grados", "ax_m_s2", "ay_m_s2", "az_m_s2",
+    "bateria_pct", "corriente_ma", "temperatura_bateria_c",
+    ...contactos.map((nombre) => `pata_${nombre}`),
+    ...Array.from({ length: cantidadCeldas }, (_, i) => `celda_${i + 1}_v`),
+  ];
+  const rows: Array<Array<string | number>> = [headers];
+  capturas.forEach(({ receivedAt, data }, index) => {
+    // Conservar también una muestra que no tenga motores.
+    const motores = data.motores.length ? data.motores : [null];
+    motores.forEach((motor) => {
+      rows.push([
+        index + 1, receivedAt, data.ts, data.modelo, motor?.id ?? "", motor?.nombre ?? "",
+        motor?.angulo ?? "", motor?.velocidad ?? "", motor?.torque ?? "", motor?.temperatura ?? "",
+        data.imu.roll, data.imu.pitch, data.imu.yaw, data.imu.ax, data.imu.ay, data.imu.az,
+        data.bms.soc, data.bms.corriente, data.bms.temperatura,
+        ...contactos.map((nombre) => data.fuerzas?.[nombre] ?? ""),
+        ...Array.from({ length: cantidadCeldas }, (_, i) => data.bms.celdas[i] ?? ""),
+      ]);
+    });
+  });
+  return `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
 }
 
 function LineChart({
@@ -178,24 +218,27 @@ export default function App() {
       socketRef.current = socket;
 
       socket.onopen = () => {
+        if (disposed || socketRef.current !== socket) return;
         attempts = 0;
         setStatus("online");
       };
 
       socket.onmessage = (event) => {
+        if (disposed || socketRef.current !== socket) return;
         try {
           const next = JSON.parse(event.data) as Telemetria;
+          const resetHistory = reiniciarHistorial(telemetryRef.current, next);
           setTelemetry(next);
           telemetryRef.current = next;
           setLastUpdate(new Date());
           setStatus("online");
           const selectedMotors = next.motores.slice(0, 4);
           setMotorHistory((current) => [
-            ...current,
+            ...(resetHistory ? [] : current),
             { t: next.ts, values: selectedMotors.map((motor) => motor.angulo) },
           ].slice(-MAX_POINTS));
           setImuHistory((current) => [
-            ...current,
+            ...(resetHistory ? [] : current),
             { t: next.ts, values: [next.imu.roll, next.imu.pitch, next.imu.yaw] },
           ].slice(-MAX_POINTS));
         } catch {
@@ -205,7 +248,7 @@ export default function App() {
 
       socket.onerror = () => socket.close();
       socket.onclose = () => {
-        if (disposed) return;
+        if (disposed || socketRef.current !== socket) return;
         setStatus("offline");
         const delay = Math.min(1000 * 2 ** attempts, 8000);
         attempts += 1;
@@ -224,65 +267,51 @@ export default function App() {
   const applyBase = useCallback(() => {
     const next = normalizarBase(draftBase);
     if (!next) return;
+    if (next === apiBase) {
+      setSettingsOpen(false);
+      return;
+    }
+    const previousSocket = socketRef.current;
+    socketRef.current = null;
+    previousSocket?.close();
+    setInfo(null);
+    setLastUpdate(null);
+    setStatus("connecting");
     setMotorHistory([]);
     setImuHistory([]);
     setTelemetry(null);
     telemetryRef.current = null;
-    capturasRef.current = [];
-    setCapturedCount(0);
     setApiBase(next);
     setDraftBase(next);
     setSettingsOpen(false);
-  }, [draftBase]);
+  }, [draftBase, apiBase]);
 
-  const model = info?.modelo ?? telemetry?.modelo;
+  const model = telemetry?.modelo ?? info?.modelo;
+  const activeInfo = info?.modelo === model ? info : null;
 
   // Requisito transversal: "Capturar" guarda una muestra puntual a pedido
   // del usuario; es independiente del refresco continuo de los gráficos.
   const capturarMuestra = useCallback(() => {
     const actual = telemetryRef.current;
     if (!actual) return;
-    capturasRef.current.push({ receivedAt: new Date().toISOString(), data: actual });
-    if (capturasRef.current.length > MAX_CAPTURAS) capturasRef.current.shift();
+    capturasRef.current.push({ receivedAt: new Date().toISOString(), data: structuredClone(actual) });
     setCapturedCount(capturasRef.current.length);
   }, []);
 
   const exportCsv = useCallback(() => {
     if (!capturasRef.current.length) return;
-    const headers = [
-      "fecha_iso", "tiempo_robot_s", "modelo", "motor_id", "motor_nombre",
-      "angulo_grados", "velocidad_rad_s", "torque_nm", "temperatura_c",
-      "roll_grados", "pitch_grados", "yaw_grados",
-      "bateria_pct", "corriente_ma", "temperatura_bateria_c",
-      "pata_FR", "pata_FL", "pata_RR", "pata_RL",
-    ];
-    const rows: Array<Array<string | number>> = [headers];
-
-    capturasRef.current.forEach(({ receivedAt, data }) => {
-      data.motores.forEach((motor) => {
-        rows.push([
-          receivedAt, data.ts, data.modelo, motor.id, motor.nombre,
-          motor.angulo, motor.velocidad, motor.torque, motor.temperatura,
-          data.imu.roll, data.imu.pitch, data.imu.yaw,
-          data.bms.soc, data.bms.corriente, data.bms.temperatura,
-          data.fuerzas?.FR ?? "", data.fuerzas?.FL ?? "",
-          data.fuerzas?.RR ?? "", data.fuerzas?.RL ?? "",
-        ]);
-      });
-    });
-
-    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const csv = generarCsv(capturasRef.current);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     link.href = url;
-    link.download = `telemetria-${model ?? "unitree"}-${timestamp}.csv`;
+    link.download = `telemetria-sesion-${timestamp}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-  }, [model]);
+  }, []);
 
   const motors = useMemo(() => telemetry?.motores ?? [], [telemetry?.motores]);
   const chartMotors = motors.slice(0, 4);
@@ -294,10 +323,11 @@ export default function App() {
     () => motors.length ? motors.reduce((sum, motor) => sum + Math.abs(motor.torque), 0) / motors.length : undefined,
     [motors],
   );
-  const supportedLegs = telemetry
-    ? Object.values(telemetry.fuerzas ?? {}).filter((value) => value > 0).length
-    : 0;
-  const robotName = info?.nombre ?? telemetry?.modelo?.toUpperCase() ?? "Robot Unitree";
+  const contactNames = model === "go2" ? ["FL", "FR", "RL", "RR"]
+    : model === "g1" ? ["L_foot", "R_foot"] : [];
+  const knownContacts = contactNames.filter((name) => estadoContacto(telemetry?.fuerzas?.[name]) !== "unknown").length;
+  const supportedLegs = contactNames.filter((name) => telemetry?.fuerzas?.[name] === 1).length;
+  const robotName = activeInfo?.nombre ?? (model ? `Unitree ${model.toUpperCase()}` : "Robot Unitree");
   const celdas = telemetry?.bms.celdas ?? [];
 
   return (
@@ -345,11 +375,11 @@ export default function App() {
         <div>
           <span className="context-label">UNIDAD ACTIVA</span>
           <strong>{robotName}</strong>
-          <span>{info?.tipo ?? "Esperando identificación"}</span>
+          <span>{activeInfo?.tipo ?? "Esperando identificación"}</span>
         </div>
         <dl>
-          <div><dt>FUENTE</dt><dd>{info?.modo ?? "—"}</dd></div>
-          <div><dt>FRECUENCIA</dt><dd>{info ? `${info.frecuencia_hz} Hz` : "—"}</dd></div>
+          <div><dt>FUENTE</dt><dd>{activeInfo?.modo ?? "—"}</dd></div>
+          <div><dt>FRECUENCIA</dt><dd>{activeInfo ? `${activeInfo.frecuencia_hz} Hz` : "—"}</dd></div>
           <div><dt>ACTUALIZADO</dt><dd>{lastUpdate ? lastUpdate.toLocaleTimeString("es-AR") : "—"}</dd></div>
         </dl>
       </section>
@@ -383,7 +413,7 @@ export default function App() {
 
         <article className="metric-card accent-card">
           <div className="card-heading"><span>ARTICULACIONES</span><span>ACTIVAS</span></div>
-          <strong className="hero-value">{motors.length || info?.n_motores || "—"}</strong>
+          <strong className="hero-value">{telemetry ? motors.length : "—"}</strong>
           <p>Motores reportando</p>
           <div className="mini-stats">
             <span><small>T° MÁX.</small>{formato(maxTemperature, 1, " °C")}</span>
@@ -409,26 +439,30 @@ export default function App() {
 
         <article className="stance-card panel">
           <div className="section-heading">
-            <div><p className="eyebrow">CONTACTO CON EL SUELO</p><h2>{model === "go2" ? "Apoyo de patas" : "Plataforma"}</h2></div>
+            <div><p className="eyebrow">CONTACTO CON EL SUELO</p><h2>{model === "go2" ? "Apoyo de patas" : model === "g1" ? "Apoyo de pies" : "Contacto"}</h2></div>
           </div>
-          {model === "go2" ? (
+          {model ? (
             <>
-              <div className="stance-visual">
+              <div className={`stance-visual ${model === "g1" ? "stance-biped" : ""}`}>
                 <div className="robot-body"><span>FRENTE</span></div>
-                {(["FL", "FR", "RL", "RR"] as const).map((leg) => (
-                  <div key={leg} className={`foot foot-${leg.toLowerCase()} ${telemetry?.fuerzas?.[leg] ? "supported" : "raised"}`}>
-                    <span>{leg}</span><i />
-                  </div>
-                ))}
+                {contactNames.map((leg) => {
+                  const state = estadoContacto(telemetry?.fuerzas?.[leg]);
+                  const label = leg === "L_foot" ? "Pie izquierdo" : leg === "R_foot" ? "Pie derecho" : leg;
+                  const description = state === "supported" ? "Apoyado" : state === "raised" ? "Sin apoyo" : "Sin datos";
+                  return (
+                    <div key={leg} className={`foot foot-${leg.toLowerCase()} ${state}`} aria-label={`${label}: ${description}`}>
+                      <span>{label}<small>{description}</small></span><i aria-hidden="true" />
+                    </div>
+                  );
+                })}
               </div>
-              <div className="stance-summary"><strong>{supportedLegs}/4</strong><span>Patas apoyadas</span></div>
+              <div className="stance-summary">
+                <strong>{knownContacts === contactNames.length ? `${supportedLegs}/${contactNames.length}` : "—"}</strong>
+                <span>{knownContacts === contactNames.length ? (model === "go2" ? "Patas apoyadas" : "Pies apoyados") : "Datos de contacto incompletos"}</span>
+              </div>
             </>
           ) : (
-            <div className="platform-message">
-              <span className="humanoid-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></span>
-              <strong>Robot humanoide</strong>
-              <p>El G1 no reporta fuerzas de patas en este contrato.</p>
-            </div>
+            <div className="platform-message"><p>Esperando identificación del robot.</p></div>
           )}
         </article>
       </section>

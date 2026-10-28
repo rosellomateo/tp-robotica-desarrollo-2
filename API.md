@@ -52,7 +52,10 @@ visualización.
 | `soc` | % de batería |
 | `fuerzas` | 1 = apoyada, 0 = en el aire |
 
-El Go2 tiene 12 motores y 4 patas; el G1 tiene 29 motores y no reporta patas.
+El Go2 tiene 12 motores y contactos FR/FL/RR/RL. El G1 tiene 29 motores;
+este backend configura los contactos R_foot/L_foot. Su disponibilidad depende
+de la fuente de telemetría. El modo demo genera ambos; no implica que sean
+mediciones reales. El frontend muestra «Sin datos» si el campo no llega.
 **Consultá `/info` en vez de asumir.**
 
 ---

@@ -3,7 +3,7 @@ cd /d "%~dp0mi_dashboard"
 
 where node >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: hace falta Node.js 20 o superior.
+  echo ERROR: hace falta Node.js 20.19.x o posterior de la rama 20, o Node.js 22.12.0 o superior.
   echo Descarga: https://nodejs.org/
   pause
   exit /b 1

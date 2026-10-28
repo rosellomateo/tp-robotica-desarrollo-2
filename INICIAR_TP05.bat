@@ -45,8 +45,8 @@ set "PYARGS="
 set "HAY_STORE="
 
 REM 0. Entorno virtual incluido con el TP, si existe y esta completo.
-if exist "entorno\.venv\Scripts\python.exe" (
-  "entorno\.venv\Scripts\python.exe" -c "import mujoco, fastapi, uvicorn" >nul 2>&1 && set "PYTHON=entorno\.venv\Scripts\python.exe"
+if exist "%~dp0entorno\.venv\Scripts\python.exe" (
+  "%~dp0entorno\.venv\Scripts\python.exe" -c "import mujoco, fastapi, uvicorn" >nul 2>&1 && set "PYTHON=%~dp0entorno\.venv\Scripts\python.exe"
 )
 
 REM 1. El lanzador. Se prefiere uno que ademas tenga MuJoCo.
@@ -91,13 +91,13 @@ if defined PYTHON goto :eof
 echo %~1| find /i "WindowsApps" >nul
 if not errorlevel 1 set "HAY_STORE=1"
 if not errorlevel 1 goto :eof
-"%~1" -c "import sys" >nul 2>&1 && set "PYTHON=%~1"
+"%~1" -c "import sys" >nul 2>&1 && set "PYTHON=%~f1"
 goto :eof
 
 :probar_ruta
 if defined PYTHON goto :eof
 if not exist "%~1" goto :eof
-"%~1" -c "import sys" >nul 2>&1 && set "PYTHON=%~1"
+"%~1" -c "import sys" >nul 2>&1 && set "PYTHON=%~f1"
 goto :eof
 
 :python_encontrado
@@ -107,9 +107,9 @@ echo    Abriendo el simulador...
 REM `start /d` en vez de `cmd /c "cd ... ^&^& ..."`: las comillas anidadas
 REM del segundo rompen cuando la ruta de Python tiene espacios, que es el
 REM caso de C:\Program Files\Python312\python.exe.
-start "Simulador" /d entorno "%PYTHON%" %PYARGS% -m sim --robot %ROBOT% --materia tp05
+start "Simulador" /d "%~dp0entorno" "%PYTHON%" %PYARGS% -m sim --robot %ROBOT% --materia tp05
 timeout /t 8 >nul
 
-"%PYTHON%" %PYARGS% entorno\arrancar_api.py --robot %ROBOT%
+"%PYTHON%" %PYARGS% "%~dp0entorno\arrancar_api.py" --robot %ROBOT%
 echo.
 pause

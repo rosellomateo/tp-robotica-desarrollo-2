@@ -1,0 +1,10 @@
+{
+  "checks": [
+    "Go2: 12 motores, cuatro contactos, BMS con 8 celdas, IMU e histórico de 80 muestras; intervalo medio 108 ms",
+    "Botones reales: 3 capturas Go2 descargadas en CSV, 36 filas con voltajes e identificación",
+    "Reinicio Go2→G1: reconexión automática, 29 motores, dos pies, historial nuevo y 4 capturas preservadas en CSV mixto",
+    "Valores controlados: 39,9 °C verde; 40 y 60 °C amarillo; 60,1 °C rojo; contactos apoyados/levantados",
+    "Sin errores JavaScript; vista móvil sin desbordamiento horizontal"
+  ],
+  "errors": []
+}
